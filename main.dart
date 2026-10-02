@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
+import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 const String projectId = 'car-tracking-5ef70';
@@ -40,10 +42,14 @@ class PassengerPage extends StatefulWidget {
 class _PassengerPageState extends State<PassengerPage> {
   final TextEditingController _car = TextEditingController(text: 'car-001');
   final AudioPlayer _player = AudioPlayer();
+  final MapController _mapCtrl = MapController();
   StreamSubscription<Position>? _posSub;
   Timer? _timer;
   Timer? _alarmStop;
   Position? _me;
+  LatLng? _bus;
+  List<LatLng> _route = [];
+  bool _centered = false;
   int _alertMin = 15;
   bool _watching = false;
   bool _alerted = false;
@@ -94,7 +100,10 @@ class _PassengerPageState extends State<PassengerPage> {
     );
 
     _posSub = Geolocator.getPositionStream(locationSettings: settings).listen(
-      (p) => _me = p,
+      (p) {
+        if (!mounted) return;
+        setState(() => _me = p);
+      },
       onError: (e) {
         if (!mounted) return;
         setState(() => _status = 'مشكلة في قراءة موقعك: $e');
@@ -104,6 +113,7 @@ class _PassengerPageState extends State<PassengerPage> {
     setState(() {
       _watching = true;
       _alerted = false;
+      _centered = false;
       _status = 'جارٍ المتابعة...';
     });
     _check();
@@ -118,7 +128,7 @@ class _PassengerPageState extends State<PassengerPage> {
         {'key': apiKey},
       ));
       if (res.statusCode == 404) {
-        _setStatus('مفيش بيانات للكود ده.', '');
+        _setStatus('مفيش بيانات للكود ده.', '', clearBus: true);
         return;
       }
       if (res.statusCode != 200) {
@@ -131,26 +141,40 @@ class _PassengerPageState extends State<PassengerPage> {
       final lat = _num(f['lat']);
       final lng = _num(f['lng']);
       if (!active || lat == null || lng == null || (lat == 0 && lng == 0)) {
-        _setStatus('الباص مش شغال حاليًا. هنبّهك أول ما يبدأ.', '');
+        _setStatus('الباص مش شغال حاليًا. هنبّهك أول ما يبدأ.', '', clearBus: true);
         return;
       }
+
+      final busPos = LatLng(lat, lng);
+      if (mounted) setState(() => _bus = busPos);
+      if (!_centered) {
+        _centered = true;
+        try {
+          _mapCtrl.move(busPos, 15);
+        } catch (_) {}
+      }
+
       final me = _me;
       if (me == null) {
-        _setStatus('بحدد موقعك...', '');
+        _setStatus('الباص شغال ✅ — بحدد موقعك...', '');
         return;
       }
       final r = await http.get(Uri.parse(
         'https://router.project-osrm.org/route/v1/driving/'
-        '$lng,$lat;${me.longitude},${me.latitude}?overview=false',
+        '$lng,$lat;${me.longitude},${me.latitude}?overview=full&geometries=geojson',
       ));
       final j = jsonDecode(r.body) as Map<String, dynamic>;
       if (j['code'] != 'Ok') {
-        _setStatus('تعذر حساب المسافة. هحاول تاني.', '');
+        _setStatus('الباص شغال ✅ — تعذر حساب المسافة.', '');
         return;
       }
       final route = (j['routes'] as List).first as Map<String, dynamic>;
+      final coords = (route['geometry']['coordinates'] as List)
+          .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+          .toList();
       final mins = ((route['duration'] as num) / 60).round();
       final km = ((route['distance'] as num) / 1000).toStringAsFixed(1);
+      if (mounted) setState(() => _route = coords);
       _setStatus('الباص شغال ✅', 'الوقت المتوقع: $mins دقيقة  •  المسافة: $km كم');
 
       if (mins <= _alertMin && !_alerted) {
@@ -164,11 +188,15 @@ class _PassengerPageState extends State<PassengerPage> {
     }
   }
 
-  void _setStatus(String s, String eta) {
+  void _setStatus(String s, String eta, {bool clearBus = false}) {
     if (!mounted) return;
     setState(() {
       _status = s;
       _eta = eta;
+      if (clearBus) {
+        _bus = null;
+        _route = [];
+      }
     });
   }
 
@@ -198,6 +226,8 @@ class _PassengerPageState extends State<PassengerPage> {
     setState(() {
       _watching = false;
       _eta = '';
+      _bus = null;
+      _route = [];
       _status = 'المتابعة اتوقفت.';
     });
   }
@@ -214,72 +244,96 @@ class _PassengerPageState extends State<PassengerPage> {
 
   @override
   Widget build(BuildContext context) {
+    final markers = <Marker>[];
+    if (_bus != null) {
+      markers.add(Marker(
+        point: _bus!,
+        width: 44,
+        height: 44,
+        child: const Text('🚌', style: TextStyle(fontSize: 34)),
+      ));
+    }
+    if (_me != null) {
+      markers.add(Marker(
+        point: LatLng(_me!.latitude, _me!.longitude),
+        width: 40,
+        height: 40,
+        child: const Text('📍', style: TextStyle(fontSize: 30)),
+      ));
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('🧭 راكب الباص'),
         backgroundColor: const Color(0xFF1A237E),
         foregroundColor: Colors.white,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            TextField(
-              controller: _car,
-              enabled: !_watching,
-              textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 20),
-              decoration: const InputDecoration(
-                labelText: 'كود السيارة',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 16),
-            DropdownButtonFormField<int>(
-              value: _alertMin,
-              decoration: const InputDecoration(
-                labelText: 'نبّهني قبل وصول الباص بـ',
-                border: OutlineInputBorder(),
-              ),
-              items: const [
-                DropdownMenuItem(value: 15, child: Text('15 دقيقة')),
-                DropdownMenuItem(value: 10, child: Text('10 دقايق')),
-                DropdownMenuItem(value: 5, child: Text('5 دقايق')),
-                DropdownMenuItem(value: 3, child: Text('3 دقايق')),
-                DropdownMenuItem(value: 1, child: Text('دقيقة واحدة')),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _car,
+                    enabled: !_watching,
+                    textAlign: TextAlign.center,
+                    decoration: const InputDecoration(
+                      labelText: 'كود السيارة',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    value: _alertMin,
+                    isExpanded: true,
+                    decoration: const InputDecoration(
+                      labelText: 'نبّهني قبل',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    items: const [
+                      DropdownMenuItem(value: 15, child: Text('15 دقيقة')),
+                      DropdownMenuItem(value: 10, child: Text('10 دقايق')),
+                      DropdownMenuItem(value: 5, child: Text('5 دقايق')),
+                      DropdownMenuItem(value: 3, child: Text('3 دقايق')),
+                      DropdownMenuItem(value: 1, child: Text('دقيقة')),
+                    ],
+                    onChanged: _watching ? null : (v) => setState(() => _alertMin = v ?? 15),
+                  ),
+                ),
               ],
-              onChanged: _watching ? null : (v) => setState(() => _alertMin = v ?? 15),
             ),
-            const SizedBox(height: 20),
-            SizedBox(
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: SizedBox(
               width: double.infinity,
-              height: 60,
+              height: 50,
               child: ElevatedButton(
                 onPressed: _watching ? _stop : _start,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _watching ? Colors.red.shade700 : Colors.green.shade700,
                   foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
                 child: Text(
                   _watching ? 'إيقاف المتابعة' : 'ابدأ المتابعة',
-                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                 ),
               ),
             ),
-            const SizedBox(height: 24),
-            Text(_status, textAlign: TextAlign.center, style: const TextStyle(fontSize: 16)),
-            if (_eta.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Text(_eta,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF2E7D32))),
-            ],
-            if (_alarmOn) ...[
-              const SizedBox(height: 24),
-              SizedBox(
+          ),
+          if (_alarmOn)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: SizedBox(
                 width: double.infinity,
-                height: 64,
+                height: 56,
                 child: ElevatedButton(
                   onPressed: _stopAlarm,
                   style: ElevatedButton.styleFrom(
@@ -287,12 +341,53 @@ class _PassengerPageState extends State<PassengerPage> {
                     foregroundColor: Colors.white,
                   ),
                   child: const Text('🔕 إيقاف صوت التنبيه',
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
               ),
-            ],
-          ],
-        ),
+            ),
+          Expanded(
+            child: FlutterMap(
+              mapController: _mapCtrl,
+              options: const MapOptions(
+                initialCenter: LatLng(30.0444, 31.2357),
+                initialZoom: 13,
+              ),
+              children: [
+                TileLayer(
+                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                  userAgentPackageName: 'com.teacherbus.teacher_bus_passenger',
+                ),
+                PolylineLayer(
+                  polylines: [
+                    if (_route.isNotEmpty)
+                      Polyline(points: _route, strokeWidth: 5, color: Colors.green),
+                  ],
+                ),
+                MarkerLayer(markers: markers),
+              ],
+            ),
+          ),
+          Container(
+            width: double.infinity,
+            color: const Color(0xFFF3F4FB),
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                Text(_status, textAlign: TextAlign.center, style: const TextStyle(fontSize: 15)),
+                if (_eta.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      _eta,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF2E7D32)),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
