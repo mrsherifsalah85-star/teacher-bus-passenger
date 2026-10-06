@@ -1,7 +1,6 @@
 import re, sys
 
 path = sys.argv[1]
-label = sys.argv[2] if len(sys.argv) > 2 else "التطبيق"
 s = open(path, encoding="utf-8").read()
 
 perms = [
@@ -18,6 +17,6 @@ add = "".join(
     for p in perms if p not in s
 )
 s = s.replace("<application", add + "    <application", 1)
-s = re.sub(r'android:label="[^"]*"', 'android:label="%s"' % label, s, count=1)
+s = re.sub(r'android:label="[^"]*"', 'android:label="سائق الباص"', s, count=1)
 open(path, "w", encoding="utf-8").write(s)
 print("manifest patched")

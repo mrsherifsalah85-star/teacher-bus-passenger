@@ -1,15 +1,23 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const String projectId = 'car-tracking-5ef70';
 const String apiKey = 'AIzaSyDn7mzRrWvCeEyCdq_O0p-Aq1aOGWsT8ok';
+const String ridersCol = 'riders_69c0006e66edbeb4';
+
+const Color kGreen = Color(0xFF2E7D32);
+const Color kBlue = Color(0xFF1A237E);
+const Color kBg = Color(0xFFF3F4FB);
 
 void main() => runApp(const PassengerApp());
 
@@ -22,7 +30,8 @@ class PassengerApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'راكب الباص',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF1A237E)),
+        colorScheme: ColorScheme.fromSeed(seedColor: kBlue),
+        scaffoldBackgroundColor: kBg,
         useMaterial3: true,
       ),
       builder: (context, child) =>
@@ -41,21 +50,134 @@ class PassengerPage extends StatefulWidget {
 
 class _PassengerPageState extends State<PassengerPage> {
   final TextEditingController _car = TextEditingController(text: 'car-001');
+  final TextEditingController _name = TextEditingController();
   final AudioPlayer _player = AudioPlayer();
   final MapController _mapCtrl = MapController();
+  final FlutterLocalNotificationsPlugin _notif = FlutterLocalNotificationsPlugin();
   StreamSubscription<Position>? _posSub;
   Timer? _timer;
   Timer? _alarmStop;
   Position? _me;
   LatLng? _bus;
+  LatLng? _station;
   List<LatLng> _route = [];
+  String _riderId = '';
+  bool? _busActive;
+  bool _choosing = false;
   bool _centered = false;
   int _alertMin = 15;
   bool _watching = false;
   bool _alerted = false;
   bool _alarmOn = false;
-  String _status = 'اختار الوقت واضغط "ابدأ المتابعة". بعدها تقدر تقفل الشاشة.';
+  String _status = 'اكتب اسمك، واختار الوقت، واضغط "ابدأ المتابعة". بعدها تقدر تقفل الشاشة.';
   String _eta = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPrefs();
+    _initNotif();
+  }
+
+  Future<void> _initNotif() async {
+    try {
+      await _notif.initialize(const InitializationSettings(
+        android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+      ));
+    } catch (_) {}
+  }
+
+  Future<void> _notifyTripStarted() async {
+    try {
+      await _notif.show(
+        1,
+        'الباص بدأ الرحلة 🚌',
+        'افتح التطبيق وتابع وصوله.',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'trip_started',
+            'بدء الرحلة',
+            importance: Importance.max,
+            priority: Priority.high,
+          ),
+        ),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _loadPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    var id = prefs.getString('rider_id');
+    if (id == null) {
+      id = 'r${DateTime.now().millisecondsSinceEpoch}${Random().nextInt(99999)}';
+      await prefs.setString('rider_id', id);
+    }
+    final name = prefs.getString('rider_name') ?? '';
+    final la = prefs.getDouble('station_lat');
+    final ln = prefs.getDouble('station_lng');
+    if (!mounted) return;
+    setState(() {
+      _riderId = id!;
+      _name.text = name;
+      if (la != null && ln != null) _station = LatLng(la, ln);
+    });
+    if (_station != null) {
+      try {
+        _mapCtrl.move(_station!, 15);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _saveStation(LatLng p) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('station_lat', p.latitude);
+    await prefs.setDouble('station_lng', p.longitude);
+    if (!mounted) return;
+    setState(() {
+      _station = p;
+      _choosing = false;
+      _route = [];
+      _status = 'اتحفظت محطتك ✅';
+    });
+    if (_watching) _check();
+  }
+
+  Future<void> _clearStation() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('station_lat');
+    await prefs.remove('station_lng');
+    if (!mounted) return;
+    setState(() {
+      _station = null;
+      _route = [];
+      _status = 'اتمسحت المحطة. هيتحسب الوقت لموقعك الحالي.';
+    });
+  }
+
+  Future<void> _useMyLocation() async {
+    try {
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        setState(() => _status = 'لازم تسمح للتطبيق بالوصول للموقع.');
+        return;
+      }
+      setState(() => _status = 'بحدد موقعك...');
+      final p = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      ).timeout(const Duration(seconds: 20));
+      final pt = LatLng(p.latitude, p.longitude);
+      await _saveStation(pt);
+      try {
+        _mapCtrl.move(pt, 16);
+      } catch (_) {}
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _status = 'مقدرتش أحدد موقعك. جرب تاني أو اختار من الخريطة.');
+    }
+  }
 
   double? _num(dynamic v) {
     if (v == null) return null;
@@ -66,8 +188,44 @@ class _PassengerPageState extends State<PassengerPage> {
     return null;
   }
 
+  Future<void> _sendRider({required bool active}) async {
+    final name = _name.text.trim();
+    if (name.isEmpty || _riderId.isEmpty) return;
+    try {
+      final fields = <String, dynamic>{
+        'name': {'stringValue': name},
+        'active': {'booleanValue': active},
+        'updated': {'timestampValue': DateTime.now().toUtc().toIso8601String()},
+      };
+      final mask = <String>['name', 'active', 'updated', 'lat', 'lng', 'stLat', 'stLng'];
+      final me = _me;
+      if (me != null) {
+        fields['lat'] = {'doubleValue': me.latitude};
+        fields['lng'] = {'doubleValue': me.longitude};
+      }
+      final st = _station;
+      if (st != null) {
+        fields['stLat'] = {'doubleValue': st.latitude};
+        fields['stLng'] = {'doubleValue': st.longitude};
+      }
+      await http.patch(
+        Uri.https(
+          'firestore.googleapis.com',
+          '/v1/projects/$projectId/databases/(default)/documents/$ridersCol/$_riderId',
+          {'updateMask.fieldPaths': mask, 'key': apiKey},
+        ),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'fields': fields}),
+      );
+    } catch (_) {}
+  }
+
   Future<void> _start() async {
     final code = _car.text.trim();
+    if (_name.text.trim().isEmpty) {
+      setState(() => _status = 'اكتب اسمك الأول عشان السائق يعرفك.');
+      return;
+    }
     if (code.isEmpty) {
       setState(() => _status = 'اكتب كود السيارة الأول.');
       return;
@@ -87,13 +245,16 @@ class _PassengerPageState extends State<PassengerPage> {
     }
     await Permission.notification.request();
 
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('rider_name', _name.text.trim());
+
     final settings = AndroidSettings(
       accuracy: LocationAccuracy.high,
       distanceFilter: 0,
       intervalDuration: const Duration(seconds: 10),
       foregroundNotificationConfig: const ForegroundNotificationConfig(
         notificationTitle: 'متابعة الباص شغالة',
-        notificationText: 'هنبّهك قبل ما الباص يوصل',
+        notificationText: 'هنبّهك لما الباص يبدأ ويقرب',
         enableWakeLock: true,
         setOngoing: true,
       ),
@@ -113,6 +274,7 @@ class _PassengerPageState extends State<PassengerPage> {
     setState(() {
       _watching = true;
       _alerted = false;
+      _busActive = null;
       _centered = false;
       _status = 'جارٍ المتابعة...';
     });
@@ -121,6 +283,7 @@ class _PassengerPageState extends State<PassengerPage> {
 
   Future<void> _check() async {
     final code = _car.text.trim();
+    await _sendRider(active: true);
     try {
       final res = await http.get(Uri.https(
         'firestore.googleapis.com',
@@ -138,6 +301,11 @@ class _PassengerPageState extends State<PassengerPage> {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       final f = (body['fields'] as Map<String, dynamic>?) ?? {};
       final active = f['active']?['booleanValue'] == true;
+      final wasActive = _busActive;
+      _busActive = active;
+      if (active && wasActive == false) {
+        await _notifyTripStarted();
+      }
       final lat = _num(f['lat']);
       final lng = _num(f['lng']);
       if (!active || lat == null || lng == null || (lat == 0 && lng == 0)) {
@@ -154,14 +322,15 @@ class _PassengerPageState extends State<PassengerPage> {
         } catch (_) {}
       }
 
-      final me = _me;
-      if (me == null) {
+      final LatLng? target = _station ??
+          (_me == null ? null : LatLng(_me!.latitude, _me!.longitude));
+      if (target == null) {
         _setStatus('الباص شغال ✅ — بحدد موقعك...', '');
         return;
       }
       final r = await http.get(Uri.parse(
         'https://router.project-osrm.org/route/v1/driving/'
-        '$lng,$lat;${me.longitude},${me.latitude}?overview=full&geometries=geojson',
+        '$lng,$lat;${target.longitude},${target.latitude}?overview=full&geometries=geojson',
       ));
       final j = jsonDecode(r.body) as Map<String, dynamic>;
       if (j['code'] != 'Ok') {
@@ -175,7 +344,8 @@ class _PassengerPageState extends State<PassengerPage> {
       final mins = ((route['duration'] as num) / 60).round();
       final km = ((route['distance'] as num) / 1000).toStringAsFixed(1);
       if (mounted) setState(() => _route = coords);
-      _setStatus('الباص شغال ✅', 'الوقت المتوقع: $mins دقيقة  •  المسافة: $km كم');
+      final toWhere = _station != null ? ' لمحطتك' : '';
+      _setStatus('الباص شغال ✅', 'الوقت المتوقع$toWhere: $mins دقيقة  •  المسافة: $km كم');
 
       if (mins <= _alertMin && !_alerted) {
         _alerted = true;
@@ -217,10 +387,11 @@ class _PassengerPageState extends State<PassengerPage> {
   }
 
   Future<void> _stop() async {
-    await _posSub?.cancel();
-    _posSub = null;
     _timer?.cancel();
     _timer = null;
+    await _sendRider(active: false);
+    await _posSub?.cancel();
+    _posSub = null;
     await _stopAlarm();
     if (!mounted) return;
     setState(() {
@@ -239,8 +410,15 @@ class _PassengerPageState extends State<PassengerPage> {
     _posSub?.cancel();
     _player.dispose();
     _car.dispose();
+    _name.dispose();
     super.dispose();
   }
+
+  BoxDecoration get _card => BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: const [BoxShadow(color: Color(0x14000000), blurRadius: 8)],
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -261,76 +439,129 @@ class _PassengerPageState extends State<PassengerPage> {
         child: const Text('📍', style: TextStyle(fontSize: 30)),
       ));
     }
+    if (_station != null) {
+      markers.add(Marker(
+        point: _station!,
+        width: 44,
+        height: 44,
+        child: const Text('🚏', style: TextStyle(fontSize: 32)),
+      ));
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('🧭 راكب الباص'),
-        backgroundColor: const Color(0xFF1A237E),
+        backgroundColor: kGreen,
         foregroundColor: Colors.white,
       ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-            child: Row(
+          Container(
+            margin: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+            padding: const EdgeInsets.all(12),
+            decoration: _card,
+            child: Column(
               children: [
-                Expanded(
-                  child: TextField(
-                    controller: _car,
-                    enabled: !_watching,
-                    textAlign: TextAlign.center,
-                    decoration: const InputDecoration(
-                      labelText: 'كود السيارة',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: TextField(
+                        controller: _name,
+                        enabled: !_watching,
+                        decoration: const InputDecoration(
+                          labelText: 'اسمك',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: TextField(
+                        controller: _car,
+                        enabled: !_watching,
+                        textAlign: TextAlign.center,
+                        decoration: const InputDecoration(
+                          labelText: 'كود السيارة',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: DropdownButtonFormField<int>(
-                    value: _alertMin,
-                    isExpanded: true,
-                    decoration: const InputDecoration(
-                      labelText: 'نبّهني قبل',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<int>(
+                        value: _alertMin,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: 'نبّهني قبل',
+                          border: OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                        items: const [
+                          DropdownMenuItem(value: 15, child: Text('15 دقيقة')),
+                          DropdownMenuItem(value: 10, child: Text('10 دقايق')),
+                          DropdownMenuItem(value: 5, child: Text('5 دقايق')),
+                          DropdownMenuItem(value: 3, child: Text('3 دقايق')),
+                          DropdownMenuItem(value: 1, child: Text('دقيقة')),
+                        ],
+                        onChanged: _watching ? null : (v) => setState(() => _alertMin = v ?? 15),
+                      ),
                     ),
-                    items: const [
-                      DropdownMenuItem(value: 15, child: Text('15 دقيقة')),
-                      DropdownMenuItem(value: 10, child: Text('10 دقايق')),
-                      DropdownMenuItem(value: 5, child: Text('5 دقايق')),
-                      DropdownMenuItem(value: 3, child: Text('3 دقايق')),
-                      DropdownMenuItem(value: 1, child: Text('دقيقة')),
-                    ],
-                    onChanged: _watching ? null : (v) => setState(() => _alertMin = v ?? 15),
-                  ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: SizedBox(
+                        height: 48,
+                        child: ElevatedButton(
+                          onPressed: _watching ? _stop : _start,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _watching ? Colors.red.shade700 : kGreen,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          child: Text(
+                            _watching ? 'إيقاف' : 'ابدأ المتابعة',
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    OutlinedButton(
+                      onPressed: () => setState(() {
+                        _choosing = !_choosing;
+                        if (_choosing) _status = 'اضغط على الخريطة في مكان محطتك.';
+                      }),
+                      child: Text(_choosing ? 'إلغاء' : '🚏 حدد محطتي'),
+                    ),
+                    OutlinedButton(
+                      onPressed: _useMyLocation,
+                      child: const Text('📍 محطتي هنا'),
+                    ),
+                    if (_station != null)
+                      OutlinedButton(
+                        onPressed: _clearStation,
+                        child: const Text('مسح المحطة'),
+                      ),
+                  ],
                 ),
               ],
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: SizedBox(
-              width: double.infinity,
-              height: 50,
-              child: ElevatedButton(
-                onPressed: _watching ? _stop : _start,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _watching ? Colors.red.shade700 : Colors.green.shade700,
-                  foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-                child: Text(
-                  _watching ? 'إيقاف المتابعة' : 'ابدأ المتابعة',
-                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-          ),
           if (_alarmOn)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
               child: SizedBox(
                 width: double.infinity,
                 height: 56,
@@ -346,31 +577,38 @@ class _PassengerPageState extends State<PassengerPage> {
               ),
             ),
           Expanded(
-            child: FlutterMap(
-              mapController: _mapCtrl,
-              options: const MapOptions(
-                initialCenter: LatLng(30.0444, 31.2357),
-                initialZoom: 13,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: FlutterMap(
+                mapController: _mapCtrl,
+                options: MapOptions(
+                  initialCenter: _station ?? const LatLng(31.2, 29.95),
+                  initialZoom: 13,
+                  onTap: (tapPos, point) {
+                    if (_choosing) _saveStation(point);
+                  },
+                ),
+                children: [
+                  TileLayer(
+                    urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                    userAgentPackageName: 'com.teacherbus.teacher_bus_passenger',
+                  ),
+                  PolylineLayer(
+                    polylines: [
+                      if (_route.isNotEmpty)
+                        Polyline(points: _route, strokeWidth: 5, color: kGreen),
+                    ],
+                  ),
+                  MarkerLayer(markers: markers),
+                ],
               ),
-              children: [
-                TileLayer(
-                  urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                  userAgentPackageName: 'com.teacherbus.teacher_bus_passenger',
-                ),
-                PolylineLayer(
-                  polylines: [
-                    if (_route.isNotEmpty)
-                      Polyline(points: _route, strokeWidth: 5, color: Colors.green),
-                  ],
-                ),
-                MarkerLayer(markers: markers),
-              ],
             ),
           ),
           Container(
             width: double.infinity,
-            color: const Color(0xFFF3F4FB),
+            margin: const EdgeInsets.all(12),
             padding: const EdgeInsets.all(12),
+            decoration: _card,
             child: Column(
               children: [
                 Text(_status, textAlign: TextAlign.center, style: const TextStyle(fontSize: 15)),
@@ -381,7 +619,7 @@ class _PassengerPageState extends State<PassengerPage> {
                       _eta,
                       textAlign: TextAlign.center,
                       style: const TextStyle(
-                          fontSize: 17, fontWeight: FontWeight.bold, color: Color(0xFF2E7D32)),
+                          fontSize: 17, fontWeight: FontWeight.bold, color: kGreen),
                     ),
                   ),
               ],
