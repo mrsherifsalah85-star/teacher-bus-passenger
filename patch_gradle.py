@@ -30,7 +30,7 @@ if os.path.exists(kts):
     assert "    buildTypes {" in s, "buildTypes not found"
     s = s.replace("    buildTypes {", signing + "    buildTypes {", 1)
     s, n = re.subn(r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
-                   'signingConfig = signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false\n            proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")', s)
+                   'signingConfig = signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false\n            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")', s)
     assert n >= 1, "debug signing line not found"
     assert "compileOptions {" in s, "compileOptions not found"
     s = s.replace("compileOptions {", "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
@@ -52,7 +52,7 @@ elif os.path.exists(groovy):
     assert "    buildTypes {" in s, "buildTypes not found"
     s = s.replace("    buildTypes {", signing + "    buildTypes {", 1)
     s, n = re.subn(r'signingConfig\s+signingConfigs\.debug',
-                   'signingConfig signingConfigs.release\n            minifyEnabled false\n            shrinkResources false\n            proguardFiles getDefaultProguardFile(\'proguard-android.txt\'), \'proguard-rules.pro\'', s)
+                   'signingConfig signingConfigs.release\n            minifyEnabled false\n            shrinkResources false\n            proguardFiles getDefaultProguardFile(\'proguard-android-optimize.txt\'), \'proguard-rules.pro\'', s)
     assert n >= 1, "debug signing line not found"
     assert "compileOptions {" in s, "compileOptions not found"
     s = s.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
