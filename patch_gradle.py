@@ -1,6 +1,17 @@
 import os, re, sys
 
 d = sys.argv[1]
+
+RULES = """-keepattributes Signature
+-keepattributes *Annotation*
+-keep class com.dexterous.** { *; }
+-keep class com.google.gson.reflect.TypeToken { *; }
+-keep class * extends com.google.gson.reflect.TypeToken
+-keep class * implements com.google.gson.TypeAdapterFactory
+-keep class * implements com.google.gson.JsonSerializer
+-keep class * implements com.google.gson.JsonDeserializer
+"""
+open(os.path.join(d, "proguard-rules.pro"), "w", encoding="utf-8").write(RULES)
 kts = os.path.join(d, "build.gradle.kts")
 groovy = os.path.join(d, "build.gradle")
 
@@ -19,7 +30,7 @@ if os.path.exists(kts):
     assert "    buildTypes {" in s, "buildTypes not found"
     s = s.replace("    buildTypes {", signing + "    buildTypes {", 1)
     s, n = re.subn(r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
-                   'signingConfig = signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false', s)
+                   'signingConfig = signingConfigs.getByName("release")\n            isMinifyEnabled = false\n            isShrinkResources = false\n            proguardFiles(getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro")', s)
     assert n >= 1, "debug signing line not found"
     assert "compileOptions {" in s, "compileOptions not found"
     s = s.replace("compileOptions {", "compileOptions {\n        isCoreLibraryDesugaringEnabled = true", 1)
@@ -41,7 +52,7 @@ elif os.path.exists(groovy):
     assert "    buildTypes {" in s, "buildTypes not found"
     s = s.replace("    buildTypes {", signing + "    buildTypes {", 1)
     s, n = re.subn(r'signingConfig\s+signingConfigs\.debug',
-                   'signingConfig signingConfigs.release\n            minifyEnabled false\n            shrinkResources false', s)
+                   'signingConfig signingConfigs.release\n            minifyEnabled false\n            shrinkResources false\n            proguardFiles getDefaultProguardFile(\'proguard-android.txt\'), \'proguard-rules.pro\'', s)
     assert n >= 1, "debug signing line not found"
     assert "compileOptions {" in s, "compileOptions not found"
     s = s.replace("compileOptions {", "compileOptions {\n        coreLibraryDesugaringEnabled true", 1)
