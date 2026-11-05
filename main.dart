@@ -145,8 +145,8 @@ class _PassengerPageState extends State<PassengerPage> {
           payload: 'start',
         );
       }
-    } catch (_) {
-      if (mounted) setState(() => _status = 'مقدرتش أظبط التذكير. جرب تاني.');
+    } catch (e) {
+      if (mounted) setState(() => _status = 'مقدرتش أظبط التذكير: $e');
     }
   }
 
