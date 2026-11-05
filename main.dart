@@ -54,6 +54,7 @@ class _PassengerPageState extends State<PassengerPage> {
   final TextEditingController _car = TextEditingController(text: 'car-001');
   final TextEditingController _name = TextEditingController();
   final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _voice = AudioPlayer();
   final MapController _mapCtrl = MapController();
   final FlutterLocalNotificationsPlugin _notif = FlutterLocalNotificationsPlugin();
   StreamSubscription<Position>? _posSub;
@@ -201,6 +202,10 @@ class _PassengerPageState extends State<PassengerPage> {
   }
 
   Future<void> _notifyTripStarted() async {
+    try {
+      await _voice.setReleaseMode(ReleaseMode.release);
+      await _voice.play(AssetSource('trip_start.mp3'));
+    } catch (_) {}
     try {
       await _notif.show(
         1,
@@ -548,6 +553,7 @@ class _PassengerPageState extends State<PassengerPage> {
     _alarmStop?.cancel();
     _posSub?.cancel();
     _player.dispose();
+    _voice.dispose();
     _car.dispose();
     _name.dispose();
     super.dispose();

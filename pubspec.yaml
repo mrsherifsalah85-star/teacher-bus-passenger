@@ -26,6 +26,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/alarm.wav
+    - assets/trip_start.mp3
 
 flutter_launcher_icons:
   android: true
